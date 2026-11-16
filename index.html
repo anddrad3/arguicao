@@ -24,7 +24,7 @@
 <div id="setup">
   <b>Configuração</b>
   <input id="key" type="password" placeholder="Chave da API Gemini (aistudio.google.com)">
-  <input id="model" placeholder="Modelo" value="gemini-2.5-flash">
+  <input id="model" placeholder="Modelo" value="gemini-3.8-flash">
   <input id="pdfs" type="file" accept="application/pdf" multiple>
   <small id="docinfo">Nenhum documento carregado.</small>
   <button id="start">Iniciar</button>
@@ -92,7 +92,8 @@ $('pdfs').onchange = async e => {
 
 try { const saved = JSON.parse(store.get('chunks')||'[]'); if (saved.length){ chunks = saved; buildIndex(); } } catch(e){}
 $('key').value = store.get('key') || '';
-$('model').value = store.get('model') || 'gemini-2.5-flash';
+const savedModel = store.get('model');
+$('model').value = (savedModel && !savedModel.includes('2.5')) ? savedModel : 'gemini-3.8-flash';
 
 // ---------- IA ----------
 async function gemini(prompt){
