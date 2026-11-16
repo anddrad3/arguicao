@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arguição</title>
+<style>
+  body { margin:0; background:#fff; color:#111; font-family:system-ui, sans-serif; padding:16px; line-height:1.45; }
+  #setup input, #setup button { display:block; width:100%; box-sizing:border-box; margin:8px 0; padding:12px; font-size:16px; }
+  #setup small { color:#666; }
+  #status { color:#999; font-size:12px; margin-bottom:12px; }
+  .qa { margin-bottom:28px; }
+  .q { font-weight:700; font-size:18px; margin-bottom:6px; }
+  .a { font-size:20px; white-space:pre-wrap; }
+  .old { opacity:.45; }
+  .old .q, .old .a { font-size:15px; }
+  #bar { position:fixed; bottom:0; left:0; right:0; display:none; gap:8px; padding:8px 16px; background:#fff; }
+  #bar button { flex:1; padding:10px; font-size:14px; }
+  #main { padding-bottom:60px; }
+</style>
+</head>
+<body>
+
+<div id="setup">
+  <b>Configuração</b>
+  <input id="key" type="password" placeholder="Chave da API Gemini (aistudio.google.com)">
+  <input id="model" placeholder="Modelo" value="gemini-2.5-flash">
+  <input id="pdfs" type="file" accept="application/pdf" multiple>
+  <small id="docinfo">Nenhum documento carregado.</small>
+  <button id="start">Iniciar</button>
+</div>
+
+<div id="main" style="display:none">
+  <div id="status">ouvindo…</div>
+  <div id="list"></div>
+</div>
+
+<div id="bar">
+  <button id="now">Responder agora</button>
+  <button id="dl">Baixar transcrição</button>
+  <button id="stop">Parar</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+const $ = id => document.getElementById(id);
+const store = {
+  get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
+  set(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
+};
+
+// ---------- Documentos ----------
+let chunks = [];   // {doc, page, text, terms}
+const STOP = new Set('a o e de da do das dos em no na nos nas um uma uns umas que para por com sem se ao aos as os é foi ser são como mais mas ou isso esse essa este esta seu sua seus suas ele ela eles elas nao sim ja muito tambem entao voce gente porque qual quais quando onde sobre entre pelo pela pelos pelas tem ter ha eu me meu minha nos lhe dele dela isso aquilo aqui ali la ta tá ne né'.split(' '));
+const norm = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+const tokens = s => norm(s).split(/[^a-z0-9]+/).filter(w => w.length > 2 && !STOP.has(w));
+let idf = {};
+
+function buildIndex(){
+  const df = {};
+  chunks.forEach(c => { c.terms = {}; tokens(c.text).forEach(w => c.terms[w] = (c.terms[w]||0)+1); Object.keys(c.terms).forEach(w => df[w]=(df[w]||0)+1); });
+  idf = {}; const N = chunks.length || 1;
+  for (const w in df) idf[w] = Math.log(1 + N/df[w]);
+  const docs = [...new Set(chunks.map(c=>c.doc))];
+  $('docinfo').textContent = docs.length ? `${docs.length} documento(s), ${chunks.length} trechos: ${docs.join(', ')}` : 'Nenhum documento carregado.';
+}
+
+function search(query, k=8){
+  const q = [...new Set(tokens(query))];
+  return chunks.map(c => {
+    let s = 0; q.forEach(w => { if (c.terms[w]) s += (1+Math.log(c.terms[w])) * (idf[w]||0); });
+    return [s,c];
+  }).filter(x=>x[0]>0).sort((a,b)=>b[0]-a[0]).slice(0,k).map(x=>x[1]);
+}
+
+$('pdfs').onchange = async e => {
+  chunks = [];
+  for (const f of e.target.files){
+    $('docinfo').textContent = 'Lendo ' + f.name + '…';
+    const pdf = await pdfjsLib.getDocument({data: await f.arrayBuffer()}).promise;
+    for (let p=1; p<=pdf.numPages; p++){
+      const tc = await (await pdf.getPage(p)).getTextContent();
+      const txt = tc.items.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+      for (let i=0; i<txt.length; i+=700) chunks.push({doc:f.name, page:p, text:txt.slice(Math.max(0,i-100), i+800)});
+    }
+  }
+  buildIndex();
+  store.set('chunks', JSON.stringify(chunks.map(({doc,page,text})=>({doc,page,text}))));
+};
+
+try { const saved = JSON.parse(store.get('chunks')||'[]'); if (saved.length){ chunks = saved; buildIndex(); } } catch(e){}
+$('key').value = store.get('key') || '';
+$('model').value = store.get('model') || 'gemini-2.5-flash';
+
+// ---------- IA ----------
+async function gemini(prompt){
+  const key = $('key').value.trim(), model = $('model').value.trim();
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+  const body = { contents:[{role:'user', parts:[{text:prompt}]}],
+                 generationConfig:{ responseMimeType:'application/json', temperature:0.2, thinkingConfig:{thinkingBudget:0} } };
+  let r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if (r.status === 400){ delete body.generationConfig.thinkingConfig;
+    r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); }
+  if (!r.ok) throw new Error('API ' + r.status + ': ' + (await r.text()).slice(0,200));
+  const d = await r.json();
+  return JSON.parse(d.candidates[0].content.parts[0].text);
+}
+
+let transcript = '', analyzedUpTo = 0, busy = false, pending = false, lastQ = '';
+
+async function analyze(force=false){
+  if (busy){ pending = true; return; }
+  const fresh = transcript.slice(analyzedUpTo).trim();
+  if (!force && fresh.split(/\s+/).length < 4) return;
+  busy = true; analyzedUpTo = transcript.length;
+  const recent = transcript.slice(-1500);
+  const hits = search(transcript.slice(-500));
+  const ctx = hits.map(c => `[${c.doc} p.${c.page}] ${c.text}`).join('\n\n');
+  const prompt =
+`Você ajuda um mestrando durante a arguição da dissertação dele. Abaixo está a transcrição automática (pode ter erros) do que a banca falou e trechos dos documentos do próprio mestrando.
+
+TRANSCRIÇÃO RECENTE:
+${recent}
+
+TRECHO NOVO (analise principalmente este):
+${fresh || recent.slice(-400)}
+
+TRECHOS DOS DOCUMENTOS:
+${ctx || '(nenhum trecho relevante encontrado)'}
+
+Tarefa: ${force ? 'identifique a última pergunta feita' : 'diga se o trecho novo contém uma pergunta ou questionamento da banca (mesmo sem ponto de interrogação)'}. Se houver, reescreva a pergunta de forma clara e dê uma resposta curta e direta (até 5 tópicos curtos), baseada nos documentos, citando [documento p.X]. Se os documentos não cobrirem, responda com base no contexto e indique "(fora dos documentos)".
+Responda só em JSON: {"ha_pergunta": true/false, "pergunta": "...", "resposta": "..."}`;
+  try {
+    $('status').textContent = 'analisando…';
+    const out = await gemini(prompt);
+    if (out.ha_pergunta && out.pergunta && out.pergunta !== lastQ){ lastQ = out.pergunta; show(out.pergunta, out.resposta); }
+    $('status').textContent = 'ouvindo…';
+  } catch(e){ $('status').textContent = 'erro: ' + e.message; }
+  busy = false;
+  if (pending){ pending = false; analyze(); }
+}
+
+function show(q, a){
+  document.querySelectorAll('.qa').forEach(el => el.classList.add('old'));
+  const div = document.createElement('div'); div.className = 'qa';
+  div.innerHTML = '<div class="q"></div><div class="a"></div>';
+  div.querySelector('.q').textContent = q; div.querySelector('.a').textContent = a;
+  $('list').prepend(div); window.scrollTo(0,0);
+}
+
+// ---------- Microfone ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec, running = false, timer, wake;
+
+function startRec(){
+  rec = new SR(); rec.lang = 'pt-BR'; rec.continuous = true; rec.interimResults = true;
+  rec.onresult = ev => {
+    for (let i=ev.resultIndex; i<ev.results.length; i++)
+      if (ev.results[i].isFinal) transcript += ev.results[i][0].transcript.trim() + ' ';
+    clearTimeout(timer); timer = setTimeout(analyze, 1800);
+  };
+  rec.onerror = ev => { if (ev.error === 'not-allowed') { $('status').textContent = 'microfone bloqueado'; running = false; } };
+  rec.onend = () => { if (running) setTimeout(() => { try { rec.start(); } catch(e){ startRec(); } }, 250); };
+  rec.start();
+}
+
+$('start').onclick = async () => {
+  if (!SR) return alert('Este navegador não suporta reconhecimento de voz. Use o Chrome.');
+  if (!$('key').value.trim()) return alert('Cole a chave da API.');
+  store.set('key', $('key').value.trim()); store.set('model', $('model').value.trim());
+  $('setup').style.display = 'none'; $('main').style.display = 'block'; $('bar').style.display = 'flex';
+  running = true; startRec();
+  try { wake = await navigator.wakeLock.request('screen'); } catch(e){}
+};
+$('stop').onclick = () => { running = false; try { rec.stop(); } catch(e){} $('status').textContent = 'parado'; };
+$('now').onclick = () => analyze(true);
+$('dl').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([transcript], {type:'text/plain'}));
+  a.download = 'transcricao.txt'; a.click();
+};
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && running) { try { wake = await navigator.wakeLock.request('screen'); } catch(e){} }
+});
+</script>
+</body>
+</html>
